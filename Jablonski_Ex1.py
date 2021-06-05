@@ -1,22 +1,33 @@
 import requests
-import zipfile
 import datetime
 import sys
+import os
+import geopandas
 import Jablonski_CLI_Arg_Handler as arg_handler
 
 
-def retrieveNasrShapefiles(date):
-    result = requests.get("https://nfdc.faa.gov/webContent/28DaySub/28DaySubscription_Effective_2021-06-17.zip")
-    open('reqs.zip', 'wb').write(result.content)
+def loadNasrShapefile(date, nasrpath="./nasr/"):
+    filepath = os.path.join(nasrpath, "{}.zip".format(date))
+    if not os.path.exists(filepath):
+        retrieveNasrShapefiles(date, nasrpath)
+    gdf = geopandas.read_file("zip://{}!Shape_Files".format(filepath))
+    print(gdf.columns)
+    return gdf
 
 
-def buildDateFromStr(dtString):
-    try:
-        year, month, day = dtString.split('-')
-        return datetime.date(year, month, day)
-    except ValueError:
-        print("Illegal date format.  Must be in YYYY-MM-DD format.")
+def retrieveNasrShapefiles(date, dlpath="./nasr/"):
+    print("downloading")
+    remote = "https://nfdc.faa.gov/webContent/28DaySub/{}/class_airspace_shape_files.zip".format(str(date))
+    result = requests.get(remote)
+    if not result.status_code == 200:
+        print("Error in file download.\nUrl used: {}\nRemote returned code: {}".format(remote, result.status_code))
         sys.exit()
+
+    if not os.path.exists(dlpath):
+        os.makedirs(dlpath)
+
+    with open("{}{}.zip".format(dlpath, date), 'wb') as outFile:
+        outFile.write(result.content)
 
 
 def getArgDict():
@@ -31,7 +42,7 @@ def getArgDict():
     
     if 'date' in rcvd:
         try:
-            arg_dict['date'] = datetime.datetime.fromisoformat(arg_dict['date'])
+            arg_dict['date'] = datetime.datetime.strptime(arg_dict['date'], "%Y-%m-%d").date()
         except ValueError:
             print("Illegal date format.  Must be in format YYYY-MM-DD")
             sys.exit()
@@ -40,4 +51,4 @@ def getArgDict():
 
 args = getArgDict()
 
-#retrieveNASR(args['date'])
+loadNasrShapefile(args['date'])
