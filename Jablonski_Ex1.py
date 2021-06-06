@@ -1,42 +1,95 @@
+# Author: Peter Jablonski
+# GEOG666, Exercise 1
+# Summer 2021
+# Version: Python 3
+# Dynamically retrieves flight restriction data from the FAA website for determining legality of flights
+# Usage: python Jablonski_Ex1.py locations=Locations.zip [date=YYYY-MM-DD] [outFile=results.csv] [queryFile=PATH_TO_FORCED_FILE]
+
 import requests
 import datetime
 import sys
 import os
 import geopandas
 import pandas as pd
+import zipfile
 import Jablonski_CLI_Arg_Handler as arg_handler
+
+
+# Transforms test dates to nasr file subscription dates
+# Params:
+#   date: A provided datetime object representing a flight date
+# Returns: Normalized datetime object matching a nasr file release
+def normalize_date_nasr(date):
+    # Earliest NASR file is effective 5/23/2019, and subsequent files are released every 28 days.
+    MIN_DATE = datetime.date.fromisoformat("2019-05-23")
+    NASR_FREQ = 28
+
+    # We can't process any dates before our earliest effective date, so exit on this case
+    if date < MIN_DATE:
+        print("Illegal date.  Earliest permitted date is {}".format(MIN_DATE))
+        sys.exit()
+
+    # Normalize the provided date to a release date (MIN_DATE + 28 * n)
+    # First calculate how many days our offset is (how many days it's been since our last subscription file posted)
+    offset = (date - MIN_DATE).days % NASR_FREQ
+    # Then subtract that offset to get back to the most recent file
+    normalized = date - datetime.timedelta(days=offset)
+    return normalized
 
 
 # Primary function for accessing the relevant flight restriction file for a given date, returning a geodataframe
 # representation. If the relevant file has not already been downloaded, signals for the file to be retrieved from
-# the FAA website.  Defaults to searching in ./nasr/, though this is command argument configurable.
+# the FAA website.  Defaults to searching in ./nasr/, though this may become command argument configurable.
 # If a specific query file is provided, that overrides all date-based file selection and that file is immediately
 # retrieved.  This query file must still be in the same format as the downloaded files.
+# Params:
+#   date: datetime representing flight date for testing
+#   nasr_path: Local directory containing flight restriction archives (default: ./nasr/)
+#   force_file: Specific local archive to load restrictions from (default: None)
+# Returns: Geodatabase containing flight restriction polygons
 def load_nasr_shapefile(date, nasr_path="./nasr/", force_file=None):
+    norm_date = normalize_date_nasr(date)
     filepath = None
     # First check for and handle if we have a force file
     if force_file:
         filepath = force_file
     else:
-        # Craft a system path of the form nasr_path/MODIFIED_DATE.zip
-        filepath = os.path.join(nasr_path, "{}.zip".format(date))
+        # Craft system path of the form {nasr_path}/{norm_date}.zip
+        filepath = os.path.join(nasr_path, "{}.zip".format(norm_date))
+
         # If the file doesn't already exist, initiate downloading from the remote site
         if not os.path.exists(filepath):
-            retrieve_nasr_shapefile(date, nasr_path)
-    # The zip archive contains a single folder with a single shapefile in it.  We can extract this directly into
-    # a geodataframe, though we do need to do some minor cleanup to fix typing for later use and analysis.
+            retrieve_nasr_shapefile(norm_date, dl_path=nasr_path)
+
+    # The zip archive contains a single folder with a single shapefile in it.  Extract this directly into a
+    # geodataframe for further analysis
     gdf = geopandas.read_file("zip://{}!Shape_Files".format(filepath))
+
+    # Type correction for future ease of use
     gdf['LOWER_VAL'] = gdf['LOWER_VAL'].astype(int)
     return gdf
 
 
-# Retrieves the flight restriction archive from the FAA website
+# Downloads the flight restriction archive from the FAA website
+# Params:
+#   date: date to download restrictions for.  Must be a valid release date
+#   dl_path: Directory to download restriction archive to
+# Returns: None
 def retrieve_nasr_shapefile(date, dl_path="./nasr/"):
-    # Remote url is generally static, with only the date changing between subscription archives.
+    compact = True
+    # Two possible remote URLs.  We first attempt to use the more compact remote file, and if not reachable,
+    # we will download the more comprehensive remote archive
     remote = "https://nfdc.faa.gov/webContent/28DaySub/{}/class_airspace_shape_files.zip".format(str(date))
 
     # Status check to confirm a successful download
     result = requests.get(remote)
+    # 404 error indicates need to use backup file
+    if result.status_code == 404:
+        remote = "https://nfdc.faa.gov/webContent/28DaySub/28DaySubscription_Effective_{}.zip".format(str(date))
+        result = requests.get(remote)
+        compact = False
+
+    # If we still haven't succeeded, exit.  Most likely cause is a bad date (too far in the future)
     if not result.status_code == 200:
         print("Error in file download.\nUrl used: {}\nRemote returned code: {}".format(remote, result.status_code))
         sys.exit()
@@ -46,12 +99,35 @@ def retrieve_nasr_shapefile(date, dl_path="./nasr/"):
         os.makedirs(dl_path)
 
     # Write the downloaded binary data to a local zip file.
-    # Zip file is in format: DL_PATH/DATE.zip
-    with open("{}{}.zip".format(dl_path, date), 'wb') as outFile:
-        outFile.write(result.content)
+    # Zip file is in format: {DL_PATH}/{DATE}.zip
+    # If we used the non-compact file, file is {DL_PATH}/LF_{DATE}.zip
+    outfile_path = os.path.join(dl_path, "{}.zip".format(str(date)))
+    with open(outfile_path, 'wb') as out_file:
+        out_file.write(result.content)
+
+    # Clean up bloated files so as not to waste disk space.  Extract the one directory we care about and transform it
+    # into its own zip archive
+    if not compact:
+        large_archive = zipfile.ZipFile(outfile_path, 'r')
+        small_temp_path = os.path.join(dl_path, "nasr_tmp.zip")
+        small_archive = zipfile.ZipFile(small_temp_path, 'w')
+
+        for file in large_archive.infolist():
+            if file.filename.startswith('Additional_Data/Shape_Files') and not file.is_dir():
+                contents = large_archive.read(file.filename)
+                file.filename = file.filename[16:]  # Trim off leading characters to remove the "Additional Data" folder
+                small_archive.writestr(file, contents)
+
+        small_archive.close()
+        large_archive.close()
+        os.remove(outfile_path)
+        os.rename(small_temp_path, outfile_path)
 
 
 # Establishes initial values for configurable parameters, and parses user provided arguments into appropriate formats
+# Params:
+#   None
+# Returns: Dictionary of parsed user-provided configuration arguments
 def get_arg_dict():
     default_args = {
         'date': datetime.date.today(),  # default date is the current date
