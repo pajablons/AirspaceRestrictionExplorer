@@ -12,7 +12,6 @@ import os
 import geopandas
 import pandas as pd
 import zipfile
-import Jablonski_CLI_Arg_Handler as arg_handler
 
 
 # Transforms test dates to nasr file subscription dates
@@ -124,6 +123,57 @@ def retrieve_nasr_shapefile(date, dl_path="./nasr/"):
         os.rename(small_temp_path, outfile_path)
 
 
+# Unpacks user command string into key/value pairs
+# Params:
+#   legal_keys: List of all allowable parameter keys
+#   arg_arr: List of values provided by the user
+#   drop_key_case: Treat as case-insensitive (by treating all as lowercase) or not
+#   deliminator: String to split keys from values
+# Returns: Dictionary of user-supplied keypairs
+def _unpack(legal_keys, arg_arr, drop_key_case, deliminator):
+    keypairs = {}
+    for arg in arg_arr:
+        try:
+            key, value = arg.split(deliminator)
+            if drop_key_case:
+                key = key.lower()
+            if not key in legal_keys:
+                raise NameError(key)
+            keypairs[key] = value
+        except NameError as err:
+            print("Illegal argument provided: {}".format(str(err.args[0])))
+        except ValueError:
+            print("Argument syntax error.  Please check your provided arguments.")
+            sys.exit()
+    return keypairs
+
+
+# Modular function for handling command line arguments.  Ensures receipt of all required arguments,
+# and fills in default args.  Allows for varied settings regarding input format.
+# Params:
+#   required: a list of required parameters (strings)
+#   defaults: a dictionary of default pairwise parameters (key: string).  Required or only used if defined -> None
+#   drop_key_case: if true, treat all input as uniformly lowercase (effectively makes interpretation case insensitive)
+#   pairwise_delim: string delimination between key/value pairs
+# Returns: A dictionary of key/value user settings., and a list of what parameters were provided by the user
+def retrieve_args(required=[], defaults={}, drop_key_case=False, pairwise_delim='='):
+    # Trim the actual program name from the call
+    arg_arr = sys.argv[1:]
+
+    # Helper function handles each individual pairing
+    arg_dict = _unpack(defaults.keys(), arg_arr, drop_key_case, pairwise_delim)
+
+    # Ensure all required parameters are set
+    if not all(key in arg_dict for key in required):
+        print("Missing required arguments.  Exiting.")
+        sys.exit()
+
+    # Immutably create our final settings from the defaults, then update with provided values
+    ret = defaults
+    ret.update(arg_dict)
+    return ret, arg_dict.keys()
+
+
 # Establishes initial values for configurable parameters, and parses user provided arguments into appropriate formats
 # Params:
 #   None
@@ -138,7 +188,7 @@ def get_arg_dict():
 
     required_args = ['locations']       # The only required argument is our input locations
 
-    arg_dict, rcvd = arg_handler.retrieve_args(defaults=default_args, required=required_args)
+    arg_dict, rcvd = retrieve_args(defaults=default_args, required=required_args)
 
     # If a date was provided (must be in YYYY-MM-DD format), parse the string to a date object
     if 'date' in rcvd:
